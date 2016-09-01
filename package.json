@@ -13,9 +13,11 @@
     "typescript"
   ],
   "license": "MIT",
+  "dependencies": {
+    "typescript": "^1.8.10"
+  },
   "devDependencies": {
     "grunt": "^1.0.1",
-    "source-map": "^0.5.6",
-    "typescript": "^1.8.10"
+    "source-map": "^0.5.6"
   }
 }
