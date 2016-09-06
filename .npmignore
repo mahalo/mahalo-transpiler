@@ -1,4 +1,5 @@
 .vscode
+typings
 .gitignore
 Gruntfile.js
 index.ts
