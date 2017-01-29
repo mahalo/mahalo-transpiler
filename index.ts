@@ -10,18 +10,26 @@ type Change = {
     depth?: number
 };
 
+const programs: ts.Program[] = [];
+const matchAttributeAccessor = /\/\*\s*(get|eval|watch|bind)(\s*[a-z][a-z0-9-]*)?\s*\*\//;
+const matchInject = /\/\*\s*inject\s*\*\//;
+const attributeAccessors = {
+    get: '',
+    eval: '?',
+    watch: '.',
+    bind: ':'
+};
+
 export default function mahaloTranspiler(moduleName: string, shouldDiagnose = false) {
     let fileName = resolveModuleName(moduleName);
-    let program = ts.createProgram([fileName], {moduleResolution: ts.ModuleResolutionKind.NodeJs});
+    let program = getProgram();
     let checker = program.getTypeChecker();
     let sourceFile = program.getSourceFile(fileName);
     let text = sourceFile.text;
     let edits: Change[] = [];
     let identifiers = [];
     let assignIdentifier = 'assign';
-    let promiseIdentifier = 'Promise';
     let shouldImportAssign = false;
-    let shouldImportPromise = true;
     let assignmentDepth = 0;
     let mahaloMap;
     
@@ -37,15 +45,11 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
         }
     }));
 
-    if (!/\/(mahalo|core-js)\//.test(fileName)) {
+    if (!/\/node_modules\/(mahalo|core-js)\//.test(fileName)) {
         findIdentifiers(sourceFile);
 
         while (identifiers.indexOf(assignIdentifier) > -1) {
             assignIdentifier = '_' + assignIdentifier;
-        }
-
-        while (identifiers.indexOf(promiseIdentifier) > -1) {
-            promiseIdentifier = '_' + promiseIdentifier;
         }
 
         findEdits(sourceFile);
@@ -76,6 +80,26 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
 
     //////////
 
+
+    function getProgram() {
+        let program: ts.Program;
+
+        programs.forEach(cachedProgram => {
+            cachedProgram.getSourceFiles().forEach(sourceFile => {
+                if (sourceFile.fileName === fileName) {
+                    program = cachedProgram;
+                }
+            });
+        });
+
+        if (!program) {
+            programs.push(
+                program = ts.createProgram([fileName], {moduleResolution: ts.ModuleResolutionKind.NodeJs})
+            );
+        }
+
+        return program;
+    }
 
     function findIdentifiers(node: ts.Node) {
         switch (node.kind) {
@@ -131,8 +155,22 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
                 break;
 
             case ts.SyntaxKind.ClassDeclaration:
+                let _node = <ts.ClassDeclaration>node;
 
-                createRouteEdit(<ts.ClassDeclaration>node);
+                if (extendsClass(_node, 'default', 'components/route')) {
+                    createRouteEdit(_node);    
+                }
+
+                if (
+                    extendsClass(_node, 'default', 'core/component') ||
+                    extendsClass(_node, 'default', 'core/component')
+                ) {
+                    createInjectEdit(<ts.ClassDeclaration>node);
+                }
+
+                if (extendsClass(_node, 'default', 'core/component')) {
+                    createAttributesEdit(<ts.ClassDeclaration>node);
+                }
 
                 break;
         }
@@ -213,7 +251,6 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
             return;
         }
         
-        
         let object = expression.expression.getText();
         let key = expression.name.getText();
          
@@ -227,10 +264,6 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
     }
 
     function createRouteEdit(node: ts.ClassDeclaration) {
-        if (!extendsRoute(node)) {
-            return;
-        }
-
         for (let member of node.members) {
             if (member.name.getText() === 'view') {
                 let initializer = <ts.StringLiteral>member['initializer'];
@@ -242,15 +275,13 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
                         start: initializer.getStart(),
                         length: initializer.getWidth(),
                         newText: `() => {
-                            return new ${promiseIdentifier}(resolve => {
+                            return new Promise(resolve => {
                                 require.ensure(${JSON.stringify(view)}, require => {
                                     resolve(require(${JSON.stringify(view)}));
                                 });
                             });
                         }`
                     });
-
-                    shouldImportPromise = true;
                 }
                 
                 return;
@@ -258,19 +289,103 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
         }
     }
 
-    function extendsRoute(node: ts.ClassDeclaration): boolean {
+    function createInjectEdit(node: ts.ClassDeclaration) {
+        let inject: [string, string][] = [];
+        let start: number;
+
+        ts.forEachChild(node, node => {
+            if (node.kind === ts.SyntaxKind.PropertyDeclaration) {
+                start || (start = node.getFullStart());
+                storeInjection(<ts.PropertyDeclaration>node, inject);
+            }
+        });
+
+        if (!inject.length) {
+            return;
+        }
+
+        let text = inject.map(
+            injection => injection.join(':')
+        ).join(',');
+
+        edits.push({
+            start: start,
+            length: 0,
+            newText: 'static inject = {' + text + '};'
+        });
+    }
+
+    function createAttributesEdit(node: ts.ClassDeclaration) {
+        let attributes: [string, string][] = [];
+        let start: number;
+
+        ts.forEachChild(node, node => {
+            if (node.kind === ts.SyntaxKind.PropertyDeclaration) {
+                start || (start = node.getFullStart());
+                storeAttribute(<ts.PropertyDeclaration>node, attributes);
+            }
+        });
+
+        if (!attributes.length) {
+            return;
+        }
+
+        let text = attributes.map(
+            attribute => attribute.join(':')
+        ).join(',');
+
+        edits.push({
+            start: start,
+            length: 0,
+            newText: 'static attributes = {' + text + '};'
+        });
+    }
+
+    function storeInjection(node: ts.PropertyDeclaration, inject: [string, string][]) {
+        ts.forEachChild(node, childNode => {
+            if (childNode.kind === ts.SyntaxKind.TypeReference) {
+                if (matchInject.test(childNode.getFullText())) {
+                    inject.push([
+                        node.name.getText(),
+                        childNode.getText()
+                    ]);
+                }
+            }
+        });
+    }
+
+    function storeAttribute(node: ts.PropertyDeclaration, attributes: [string, string][]) {
+        let text = node.getFullText();
+        let match = matchAttributeAccessor.exec(text);
+
+        if (!match) {
+            return;
+        }
+
+        let type = attributeAccessors[match[1]];
+        
+        attributes.push([
+            node.name.getText(),    
+            "'" + type + (match[2] ? match[2].trim() : '') + "'"
+        ]);
+    }
+
+    function extendsClass(node: ts.ClassDeclaration, name: string, from: string) {
         if (node.heritageClauses) {
             for (let clause of node.heritageClauses) {
                 if (clause.token === ts.SyntaxKind.ExtendsKeyword) {
-                    let symbolForType = checker.getTypeAtLocation(clause.types[0].expression).symbol;
-                    
-                    if (symbolForType.name === 'default' && symbolForType['parent']) {
-                        if (/\/node_modules\/mahalo\/components\/route"$/.test(symbolForType['parent'].name)) {
+                    let symbol = checker.getTypeAtLocation(clause.types[0].expression).symbol;
+                    let declaration = <ts.ClassDeclaration>symbol.valueDeclaration;
+
+                    if (symbol.name === name && declaration) {
+                        let fileName = declaration.getSourceFile().fileName;
+                        
+                        if (new RegExp('/node_modules/mahalo/' + from + '.ts$').test(fileName)) {
                             return true;
                         }
 
-                        if (symbolForType.valueDeclaration.kind === ts.SyntaxKind.ClassDeclaration) {
-                            return extendsRoute(<ts.ClassDeclaration>symbolForType.valueDeclaration);
+                        if (declaration.kind === ts.SyntaxKind.ClassDeclaration) {
+                            return extendsClass(declaration, name, from);
                         }
                     }
                     
@@ -283,12 +398,6 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
     }
 
     function importModules() {
-        shouldImportPromise && edits.unshift({
-            start: 0,
-            length: 0,
-            newText: "import * as " + promiseIdentifier + " from 'core-js/library/es6/promise';\n"
-        });
-
         shouldImportAssign && edits.unshift({
             start: 0,
             length: 0,
@@ -297,18 +406,22 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
     }
 }
 
+export function clearPrograms() {
+    programs.length = 0;
+}
+
 
 //////////
 
 
 function resolveModuleName(moduleName: string) {
     let host = ts.createCompilerHost({allowJs: true});
-    let file = ts.nodeModuleNameResolver(moduleName, '', {allowJs: true}, host);
+    let file = ts.nodeModuleNameResolver(moduleName.replace(/\.ts$/, ''), '', {allowJs: true}, host);
     
     if (!file) {
         throw Error('Cannot find module ' + moduleName);
     }
-
+    
     return resolve(file.resolvedModule.resolvedFileName).replace(/\\/g, '/');
 }
 
@@ -346,7 +459,7 @@ function applyEdits(fileName: string, text: string, edits: Change[]) {
 /**
  * Merges the source maps provided by each of the two steps.
  */
-function mergeSourceMaps(mahaloMap: {sources: string[]}, typescriptMap: {}) {
+function mergeSourceMaps(mahaloMap: sourceMap.RawSourceMap, typescriptMap: sourceMap.RawSourceMap) {
     if (!mahaloMap) {
         return typescriptMap;
     }

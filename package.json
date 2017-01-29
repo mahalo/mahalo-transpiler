@@ -14,10 +14,16 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "typescript": "^1.8.10"
+    "@types/node": "^6.0.52",
+    "@types/source-map": "^0.5.0",
+    "source-map": "^0.5.6",
+    "typescript": "^2.1.4"
   },
   "devDependencies": {
-    "grunt": "^1.0.1",
-    "source-map": "^0.5.6"
+    "grunt": "^1.0.1"
+  },
+  "scripts": {
+    "version": "grunt",
+    "postversion": "git push && git push --tags && git push public && git push public --tags"
   }
 }

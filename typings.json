@@ -1,8 +1,0 @@
-{
-  "name": "mahalo-transpiler",
-  "dependencies": {},
-  "globalDependencies": {
-    "node": "registry:dt/node#6.0.0+20160831021119",
-    "source-map": "registry:dt/source-map#0.0.0+20160317120654"
-  }
-}
