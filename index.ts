@@ -19,6 +19,12 @@ const attributeAccessors = {
     watch: '.',
     bind: ':'
 };
+const compilerOptions: ts.CompilerOptions = {
+    target: ts.ScriptTarget.ES5,
+    module: ts.ModuleKind.CommonJS,
+    // moduleResolution: ts.ModuleResolutionKind.NodeJs,
+    allowJs: true
+};
 
 export default function mahaloTranspiler(moduleName: string, shouldDiagnose = false) {
     let fileName = resolveModuleName(moduleName);
@@ -90,7 +96,7 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
 
         if (!program) {
             programs.push(
-                program = ts.createProgram([fileName], {moduleResolution: ts.ModuleResolutionKind.NodeJs})
+                program = ts.createProgram([fileName], compilerOptions, createCompilerHost())
             );
         }
 
@@ -410,8 +416,12 @@ export function clearPrograms() {
 
 
 function resolveModuleName(moduleName: string) {
-    let host = ts.createCompilerHost({allowJs: true});
-    let file = ts.nodeModuleNameResolver(moduleName.replace(/\.ts$/, ''), '', {allowJs: true}, host);
+    let file = ts.nodeModuleNameResolver(
+        moduleName.replace(/\.ts$/, ''),
+        '',
+        compilerOptions,
+        createCompilerHost()
+    );
     
     if (!file) {
         throw Error('Cannot find module ' + moduleName);
@@ -504,4 +514,23 @@ function getLineAndColumn(text, i) {
     }
 
     return {line: line, column: column};
+}
+
+const resolutionHost = {
+    fileExists: ts.sys.fileExists,
+    readFile: ts.sys.readFile
+};
+
+function createCompilerHost(): ts.CompilerHost {
+    let host = ts.createCompilerHost(compilerOptions);
+    
+    host.resolveModuleNames = resolveModuleNames;
+
+    return host;
+
+    function resolveModuleNames(moduleNames: string[], containingFile: string): ts.ResolvedModule[] {
+        return moduleNames.map(
+            moduleName => ts.resolveModuleName(moduleName, containingFile, compilerOptions, resolutionHost).resolvedModule
+        );
+    }
 }
