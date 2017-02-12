@@ -11,7 +11,7 @@ type Change = {
 };
 
 const programs: ts.Program[] = [];
-const matchAttributeAccessor = /\/\*\s*(get|eval|watch|bind)(\s*[a-z][a-z0-9-]*)?\s*\*\//;
+const matchAttributeAccessor = /:\s*\/\*\s*(get|eval|watch|bind)(\s*[a-z][a-z0-9-]*)?\s*\*\//;
 const matchInject = /\/\*\s*inject\s*\*\//;
 const attributeAccessors = {
     get: '',
@@ -33,17 +33,13 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
     let assignmentDepth = 0;
     let mahaloMap;
     
-    shouldDiagnose && [
-        // 'getDeclarationDiagnostics',
-        'getGlobalDiagnostics',
-        'getOptionsDiagnostics',
-        'getSemanticDiagnostics',
-        'getSyntacticDiagnostics'
-    ].forEach(method => program[method]().forEach(diagnostic => {
-        if (diagnostic.category === ts.DiagnosticCategory.Error) {
-            throw Error(diagnostic.messageText.toString());
+    shouldDiagnose && ts.getPreEmitDiagnostics(program, sourceFile).forEach(
+        diagnostic => {
+            if (diagnostic.category === ts.DiagnosticCategory.Error) {
+                throw Error(diagnostic.messageText.toString());
+            }
         }
-    }));
+    );
 
     if (!/\/node_modules\/(mahalo|core-js)\//.test(fileName)) {
         findIdentifiers(sourceFile);
@@ -355,8 +351,7 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
     }
 
     function storeAttribute(node: ts.PropertyDeclaration, attributes: [string, string][]) {
-        let text = node.getFullText();
-        let match = matchAttributeAccessor.exec(text);
+        let match = matchAttributeAccessor.exec(node.getText());
 
         if (!match) {
             return;
