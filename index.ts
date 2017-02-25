@@ -1,44 +1,47 @@
 import * as ts from 'typescript';
 import {resolve, basename} from 'path';
 import {existsSync, readFileSync} from 'fs';
-import {SourceMapConsumer, SourceMapGenerator} from 'source-map';
-
-type Change = {
-    start: number,
-    length: number,
-    newText: string,
-    depth?: number
-};
+import {SourceMapConsumer, SourceMapGenerator, SourceNode} from 'source-map';
+import * as mergeSourceMaps from 'merge-source-map';
 
 const programs: ts.Program[] = [];
+
 const matchAttributeAccessor = /:\s*\/\*\s*(get|eval|watch|bind)(\s*[a-z][a-z0-9-]*)?\s*\*\//;
 const matchInject = /\/\*\s*inject\s*\*\//;
+
 const attributeAccessors = {
     get: '',
     eval: '?',
     watch: '.',
     bind: ':'
 };
+
 const compilerOptions: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES5,
     module: ts.ModuleKind.CommonJS,
-    // moduleResolution: ts.ModuleResolutionKind.NodeJs,
-    allowJs: true
+    allowJs: true,
+    sourceMap: true
+};
+
+const resolutionHost = {
+    fileExists: ts.sys.fileExists,
+    readFile: ts.sys.readFile
 };
 
 export default function mahaloTranspiler(moduleName: string, shouldDiagnose = false) {
     let fileName = resolveModuleName(moduleName);
-    let program = getProgram();
+    
+    let program = getProgram(fileName);
     let checker = program.getTypeChecker();
+    
     let sourceFile = program.getSourceFile(fileName);
-    let text = sourceFile.text;
-    let edits: Change[] = [];
+    let sourceText = sourceFile.text;
+    let sourceMap;
+
     let identifiers = [];
     let assignIdentifier = 'assign';
     let shouldImportAssign = false;
-    let assignmentDepth = 0;
-    let mahaloMap;
-    
+
     shouldDiagnose && ts.getPreEmitDiagnostics(program, sourceFile).forEach(
         diagnostic => {
             if (diagnostic.category === ts.DiagnosticCategory.Error) {
@@ -46,78 +49,60 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
             }
         }
     );
-
+    
     if (!/\/node_modules\/(mahalo|core-js)\//.test(fileName)) {
         findIdentifiers(sourceFile);
-
+        
         while (identifiers.indexOf(assignIdentifier) > -1) {
             assignIdentifier = '_' + assignIdentifier;
         }
 
-        findEdits(sourceFile);
+        let sourceNode = createSourceNode(sourceFile);
 
-        importModules();
+        shouldImportAssign && sourceNode.prepend('import {assign as ' + assignIdentifier + "} from 'mahalo';\n");
 
-        let edited = applyEdits(basename(fileName), text, edits);
+        let stringWithSourceMap = sourceNode.toStringWithSourceMap();
 
-        text = edited.text;
-
-        mahaloMap = edited.map;
+        sourceText = stringWithSourceMap.code;
+        
+        sourceMap = JSON.parse(stringWithSourceMap.map.toString());
     }
 
-    let result = ts.transpileModule(text, {
+    let result = ts.transpileModule(sourceText, {
         fileName: fileName,
-        compilerOptions: {
-            target: ts.ScriptTarget.ES5,
-            sourceMap: true
-        }
+        compilerOptions: compilerOptions
     });
 
     return {
         fileName: fileName,
-        text: result.outputText.replace(/(\r\n|\r|\n)\/\/# sourceMappingURL=.*\.js\.map$/, ''),
-        map: mergeSourceMaps(mahaloMap, JSON.parse(result.sourceMapText))
+        text: result.outputText.replace(/\s\/\/# sourceMappingURL=.*$/, ''),
+        map: mergeSourceMaps(sourceMap, JSON.parse(result.sourceMapText))
     };
 
 
     //////////
 
 
-    function getProgram() {
-        let program: ts.Program;
-
-        programs.forEach(cachedProgram => {
-            cachedProgram.getSourceFiles().forEach(sourceFile => {
-                if (sourceFile.fileName === fileName) {
-                    program = cachedProgram;
-                }
-            });
-        });
-
-        if (!program) {
-            programs.push(
-                program = ts.createProgram([fileName], compilerOptions, createCompilerHost())
-            );
-        }
-
-        return program;
-    }
-
-    function findIdentifiers(node: ts.Node) {
+    function findIdentifiers(node: ts.SourceFile|ts.FunctionDeclaration|ts.FunctionExpression|ts.NamespaceDeclaration|ts.ModuleDeclaration) {
         switch (node.kind) {
+            case ts.SyntaxKind.SourceFile:
+            case ts.SyntaxKind.ModuleDeclaration:
             case ts.SyntaxKind.FunctionDeclaration:
             case ts.SyntaxKind.FunctionExpression:
-            case ts.SyntaxKind.SourceFile:
                 Object.keys(node['locals']).forEach(identifier => identifiers.push(identifier));
         }
         
         ts.forEachChild(node, findIdentifiers);
     }
 
-    function findEdits(node: ts.Node) {
+    function findEdits(node: EditKind, parentSourceNode: SourceNode) {
+        let sourceNode = createSourceNode(node);
+
+        parentSourceNode.add(sourceNode);
+
         switch (node.kind) {
             case ts.SyntaxKind.BinaryExpression:
-                switch ((<ts.BinaryExpression>node).operatorToken.kind) {
+                switch (node.operatorToken.kind) {
                     case ts.SyntaxKind.FirstAssignment:
                     case ts.SyntaxKind.PlusEqualsToken:
                     case ts.SyntaxKind.MinusEqualsToken:
@@ -131,14 +116,8 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
                     case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken:
                     case ts.SyntaxKind.LessThanLessThanEqualsToken:
                     case ts.SyntaxKind.CaretEqualsToken:
-
-                        createAssignmentEdit(<ts.BinaryExpression>node);
-
-                        assignmentDepth++;
-                        ts.forEachChild(node, findEdits);
-                        assignmentDepth--;
-
-                        return;
+                        
+                        return createAssignment(<ts.BinaryExpression>node, sourceNode);
                 }
 
                 break;
@@ -146,152 +125,225 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
             case ts.SyntaxKind.PrefixUnaryExpression:
             case ts.SyntaxKind.PostfixUnaryExpression:
 
-                createUpdateEdit(<ts.PrefixUnaryExpression | ts.PostfixUnaryExpression>node);
-
+                switch (node.operator) {
+                    case ts.SyntaxKind.PlusPlusToken:
+                    case ts.SyntaxKind.MinusMinusToken:
+                        
+                        return createUpdateAssignment(<ts.PrefixUnaryExpression|ts.PostfixUnaryExpression>node, sourceNode);
+                }
+                
                 break;
 
             case ts.SyntaxKind.DeleteExpression:
 
-                createDeleteEdit(<ts.DeleteExpression>node);
+                switch (node.expression.kind) {
+                    case ts.SyntaxKind.PropertyAccessExpression:
+                    case ts.SyntaxKind.ElementAccessExpression:
+                        
+                        return createDeleteAssignment(<MemberKind>node.expression, sourceNode);
+                }
 
                 break;
 
             case ts.SyntaxKind.ClassDeclaration:
-                let _node = <ts.ClassDeclaration>node;
-
-                if (extendsClass(_node, 'default', 'components/route')) {
-                    createRouteEdit(_node);    
-                }
-
                 if (
-                    extendsClass(_node, 'default', 'core/component') ||
-                    extendsClass(_node, 'default', 'core/component')
+                    extendsClass(node, 'default', 'core/component') ||
+                    extendsClass(node, 'default', 'core/behavior')
                 ) {
-                    createInjectEdit(<ts.ClassDeclaration>node);
+                    createInject(node, sourceNode);
                 }
 
-                if (extendsClass(_node, 'default', 'core/component')) {
-                    createAttributesEdit(<ts.ClassDeclaration>node);
+                if (extendsClass(node, 'default', 'core/component')) {
+
+                    createAttributes(node, sourceNode);
                 }
 
                 break;
-        }
 
-        ts.forEachChild(node, findEdits);
+            case ts.SyntaxKind.StringLiteral:
+                let property = <ts.PropertyDeclaration>node.parent;
+                let initializer = property.initializer;
+                let name = property.name;
+                let parent = <ts.ClassDeclaration>property.parent;
+
+                if (
+                    initializer === node &&
+                    name.getText() === 'view' &&
+                    parent.kind === ts.SyntaxKind.ClassDeclaration &&
+                    extendsClass(parent, 'default', 'components/route')
+                ) {
+                    return createView(node, sourceNode);
+                }
+        }
     }
 
-    function createAssignmentEdit(node: ts.BinaryExpression) {
-        let change = <Change>{
-            start: node.getStart(),
-            length: node.getWidth(),
-            newText: '',
-            depth: assignmentDepth
-        };
+    function createSourceNode(node: ts.Node) {
+        let start = node.getFullStart();
+        let end = start + node.getFullWidth();
+        let position = ts.getLineAndCharacterOfPosition(sourceFile, start);
+        let sourceNode = new SourceNode(position.line + 1, position.character, fileName);
 
-        let operatorToken = node.operatorToken;
+        ts.forEachChild(node, child => {
+            let childStart = child.getFullStart();
 
-        let left = <ts.PropertyAccessExpression>node.left;
+            sourceNode.add(
+                sourceText.substr(start, childStart - start)
+            );
+
+            start = childStart + child.getFullWidth();
+
+            findEdits(<EditKind>child, sourceNode);
+        });
+
+        sourceNode.add(
+            sourceText.substr(start, end - start)
+        );
+
+        return sourceNode;
+    }
+
+    function createAssignment(node: ts.BinaryExpression, sourceNode: SourceNode) {
+        shouldImportAssign = true;
+
+        let left = <MemberKind>node.left;
+
+        if (!isMemberKind(left)) {
+            sourceNode.prepend(assignIdentifier + '(');
+            sourceNode.add(')');
+            return;
+        }
+
+        let value = createSourceNode(node.right);
+        let start = node.getFullStart();
+
+        sourceNode.children.length = 0;
+        sourceNode.add(sourceText.substr(start, node.getStart() - start));
 
         if (left.kind === ts.SyntaxKind.PropertyAccessExpression) {
-            let object = left.expression.getText();
-            let key = left.name.getText();
-            let value = node.right.getText();
 
-            if (operatorToken.kind !== ts.SyntaxKind.FirstAssignment) {
-                let operator = operatorToken.getText().substr(0, operatorToken.getWidth() - 1);
+            sourceNode.add(
+                assignIdentifier + '(' +
+                left.expression.getText() + ', ' +
+                JSON.stringify(left.name.getText()) + ', '
+            );
 
-                value = `${left.getText()} ${operator} ${value}`;
-            }
+        } else if (left.kind === ts.SyntaxKind.ElementAccessExpression) {
 
-            change.newText = `${assignIdentifier}(${object}, ${JSON.stringify(key)}, ${value})`;
-        } else {
-            change.newText = `${assignIdentifier}(${node.getText()})`;
+            sourceNode.add(
+                assignIdentifier + '(' +
+                left.expression.getText() + ', ' +
+                left.argumentExpression.getText() + ', '
+            );
         }
 
-        edits.push(change);
+        if (node.operatorToken.kind !== ts.SyntaxKind.FirstAssignment) {
+            sourceNode.add([
+                left.getText(),
+                node.operatorToken.getText()
+            ]);
+        }
 
-        shouldImportAssign = true;
+        sourceNode.add([value, ')']);
     }
 
-    function createUpdateEdit(node: ts.PrefixUnaryExpression | ts.PostfixUnaryExpression) {
-        if ([ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].indexOf(node.operator) === -1) {
+    function createUpdateAssignment(node: ts.PrefixUnaryExpression|ts.PostfixUnaryExpression, sourceNode: SourceNode) {
+        shouldImportAssign = true;
+
+        let operand = <MemberKind>node.operand;
+
+        if (!isMemberKind(operand)) {
+            sourceNode.prepend(assignIdentifier + '(');
+            sourceNode.add(')');
             return;
         }
 
         let operator = node.operator === ts.SyntaxKind.PlusPlusToken ? '+' : '-';
-        let change = <Change>{
-            start: node.getStart(),
-            length: node.getWidth()
-        };
+        let value = operand.getText() + ' ' + operator + ' 1';
+        let start = node.getFullStart();
 
-        let operand = <ts.PropertyAccessExpression>node.operand;
+        sourceNode.children.length = 0;
+        sourceNode.add(sourceText.substr(start, node.getStart() - start));
 
         if (operand.kind === ts.SyntaxKind.PropertyAccessExpression) {
-            let object = operand.expression.getText();
-            let key = operand.name.getText();
-            let value = `${operand.getText()} ${operator} 1`;
 
-            change.newText = `${assignIdentifier}(${object}, ${JSON.stringify(key)}, ${value})`;
-
-            if (node.kind === ts.SyntaxKind.PostfixUnaryExpression) {
-                change.newText = `(${change.newText} ${operator === '+' ? '-' : '+'} 1)`;
-            }
-        } else {
+            sourceNode.add(
+                assignIdentifier + '(' +
+                operand.expression.getText() + ', ' +
+                JSON.stringify(operand.name.getText()) + ', '
+            );
             
-            change.newText = `${assignIdentifier}(${node.getText()})`;
+        } else if (operand.kind === ts.SyntaxKind.ElementAccessExpression) {
+
+            sourceNode.add(
+                assignIdentifier + '(' +
+                operand.expression.getText() + ', ' +
+                operand.argumentExpression.getText() + ', '
+            );
         }
 
-        edits.push(change);
+        sourceNode.add(value + ')');
 
-        shouldImportAssign = true;
+        if (node.kind === ts.SyntaxKind.PostfixUnaryExpression) {
+            sourceNode.prepend('(');
+            sourceNode.add(operator === '+' ? ' - 1)' : ' + 1)');
+        }
     }
 
-    function createDeleteEdit(node: ts.DeleteExpression) {
-        let expression = <ts.PropertyAccessExpression>node.expression;
+    function createDeleteAssignment(node: MemberKind, sourceNode: SourceNode) {
+        shouldImportAssign = true;
 
-        if (node.expression.kind !== ts.SyntaxKind.PropertyAccessExpression) {
+        if (!isMemberKind(node)) {
+            sourceNode.prepend(assignIdentifier + '(');
+            sourceNode.add(')');
+
             return;
         }
-        
-        let object = expression.expression.getText();
-        let key = expression.name.getText();
-         
-        edits.push({
-            start: node.getStart(),
-            length: node.getWidth(),
-            newText: `${assignIdentifier}(${object}, ${JSON.stringify(key)})`
-        });
 
-        shouldImportAssign = true;
-    }
+        let parent = node.parent;
+        let start = parent.getFullStart();
 
-    function createRouteEdit(node: ts.ClassDeclaration) {
-        for (let member of node.members) {
-            if (member.name.getText() === 'view') {
-                let initializer = <ts.StringLiteral>member['initializer'];
+        sourceNode.children.length = 0;
 
-                if (initializer && initializer.kind === ts.SyntaxKind.StringLiteral) {
-                    let view = initializer.text;
-                    
-                    edits.push({
-                        start: initializer.getStart(),
-                        length: initializer.getWidth(),
-                        newText: `() => {
-                            return new Promise(resolve => {
-                                require.ensure(${JSON.stringify(view)}, require => {
-                                    resolve(require(${JSON.stringify(view)}));
-                                });
-                            });
-                        }`
-                    });
-                }
-                
-                return;
-            }
+        sourceNode.add(sourceText.substr(start, parent.getStart() - start));
+
+        if (node.kind === ts.SyntaxKind.PropertyAccessExpression) {
+            
+            sourceNode.add(
+                assignIdentifier + '(' +
+                node.expression.getText() + ', ' +
+                JSON.stringify(node.name.getText()) + ')'
+            );
+
+        } else if (node.kind === ts.SyntaxKind.ElementAccessExpression) {
+            
+            sourceNode.add(
+                assignIdentifier + '(' +
+                node.expression.getText() + ', ' +
+                node.argumentExpression.getText() + ')'
+            );
         }
     }
 
-    function createInjectEdit(node: ts.ClassDeclaration) {
+    function isMemberKind(node: ts.Node): node is MemberKind {
+        return node.kind === ts.SyntaxKind.PropertyAccessExpression || node.kind === ts.SyntaxKind.ElementAccessExpression;
+    }
+
+    function createView(node: ts.StringLiteral, sourceNode: SourceNode) {
+        let view = JSON.stringify(node.getText());
+        
+        sourceNode.children.length = 0;
+
+        sourceNode.add(
+            '() => new Promise(' +
+                'resolve => require.ensure(' +
+                    view + ', ' +
+                    'require => resolve(require(' + view + '))' +
+                ')' +
+            ')'
+        );
+    }
+
+    function createInject(node: ts.ClassDeclaration, sourceNode: SourceNode) {
         let inject: [string, string][] = [];
         let start: number;
 
@@ -306,18 +358,14 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
             return;
         }
 
-        let text = inject.map(
-            injection => injection.join(':')
-        ).join(',');
-
-        edits.push({
-            start: start,
-            length: 0,
-            newText: 'static inject = {' + text + '};'
-        });
+        appendProperty(
+            node.name.getText() + '.inject',
+            '{' + inject.map( injection => injection.join(':') ).join(',') + '}',
+            sourceNode
+        );
     }
 
-    function createAttributesEdit(node: ts.ClassDeclaration) {
+    function createAttributes(node: ts.ClassDeclaration, sourceNode: SourceNode) {
         let attributes: [string, string][] = [];
         let start: number;
 
@@ -332,26 +380,27 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
             return;
         }
 
-        let text = attributes.map(
-            attribute => attribute.join(':')
-        ).join(',');
+        appendProperty(
+            node.name.getText() + '.attributes',
+            '{' + attributes.map( attribute => attribute.join(':') ).join(',') + '}',
+            sourceNode
+        );
+    }
 
-        edits.push({
-            start: start,
-            length: 0,
-            newText: 'static attributes = {' + text + '};'
-        });
+    function appendProperty(property: string, value: string, sourceNode: SourceNode) {
+        sourceNode.add(`${ property } = ${ property } ? Object.assign(${ property }, ${ value }) : ${ value };`);
     }
 
     function storeInjection(node: ts.PropertyDeclaration, inject: [string, string][]) {
         ts.forEachChild(node, childNode => {
-            if (childNode.kind === ts.SyntaxKind.TypeReference) {
-                if (matchInject.test(childNode.getFullText())) {
-                    inject.push([
-                        node.name.getText(),
-                        childNode.getText()
-                    ]);
-                }
+            if (
+                childNode.kind === ts.SyntaxKind.TypeReference &&
+                matchInject.test(childNode.getFullText())
+            ) {
+                inject.push([
+                    node.name.getText(),
+                    childNode.getText()
+                ]);
             }
         });
     }
@@ -363,52 +412,69 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
             return;
         }
 
-        let type = attributeAccessors[match[1]];
+        let type = match[1];
+        let name = match[2];
+        let key = node.name.getText() + (node.questionToken ? '?' : '');
+        let value = attributeAccessors[type] + (name ? name.trim() : '');
         
         attributes.push([
-            node.name.getText(),    
-            "'" + type + (match[2] ? match[2].trim() : '') + "'"
+            JSON.stringify(key),
+            JSON.stringify(value)
         ]);
     }
 
     function extendsClass(node: ts.ClassDeclaration, name: string, from: string) {
-        if (node.heritageClauses) {
-            for (let clause of node.heritageClauses) {
-                if (clause.token === ts.SyntaxKind.ExtendsKeyword) {
-                    let symbol = checker.getTypeAtLocation(clause.types[0].expression).symbol;
-                    let declaration = <ts.ClassDeclaration>symbol.valueDeclaration;
-
-                    if (symbol.name === name && declaration) {
-                        let fileName = declaration.getSourceFile().fileName;
-                        
-                        if (new RegExp('/node_modules/mahalo/' + from + '.ts$').test(fileName)) {
-                            return true;
-                        }
-
-                        if (declaration.kind === ts.SyntaxKind.ClassDeclaration) {
-                            return extendsClass(declaration, name, from);
-                        }
-                    }
-                    
-                    break;
-                }
-            }
+        if (!node.heritageClauses) {
+            return;
         }
 
-        return false;
-    }
+        for (let clause of node.heritageClauses) {
+            if (clause.token !== ts.SyntaxKind.ExtendsKeyword) {
+                continue;
+            }
 
-    function importModules() {
-        shouldImportAssign && edits.unshift({
-            start: 0,
-            length: 0,
-            newText: "import {assign as " + assignIdentifier + "} from 'mahalo';\n"
-        });
+            let symbol = checker.getTypeAtLocation(clause.types[0].expression).symbol;
+            let declaration = <ts.ClassDeclaration>symbol.valueDeclaration;
+
+            if (symbol.name === name && declaration) {
+                let fileName = declaration.getSourceFile().fileName;
+                
+                if (new RegExp('/node_modules/mahalo/' + from + '.ts$').test(fileName)) {
+                    return true;
+                }
+
+                if (declaration.kind === ts.SyntaxKind.ClassDeclaration) {
+                    return extendsClass(declaration, name, from);
+                }
+            }
+            
+            break;
+        }
     }
 }
 
 export function clearPrograms() {
     programs.length = 0;
+}
+
+export function getProgram(fileName) {
+    let program: ts.Program;
+
+    programs.forEach(cachedProgram => {
+        cachedProgram.getSourceFiles().forEach(sourceFile => {
+            if (sourceFile.fileName === fileName) {
+                program = cachedProgram;
+            }
+        });
+    });
+
+    if (!program) {
+        programs.push(
+            program = ts.createProgram([fileName], compilerOptions, createCompilerHost())
+        );
+    }
+
+    return program;
 }
 
 
@@ -430,97 +496,6 @@ function resolveModuleName(moduleName: string) {
     return resolve(file.resolvedModule.resolvedFileName).replace(/\\/g, '/');
 }
 
-function applyEdits(fileName: string, text: string, edits: Change[]) {
-    let result = text;
-    let mapGenerator = new SourceMapGenerator();
-    let change = edits[0];
-    let i = 0;
-    let delta = 0;
-
-    while (change) {
-        let depth = change.depth || 0;
-        let start = change.start + delta - depth;
-        let head = result.substr(0, start);
-        let tail = result.substr(start + change.length);
-
-        delta += change.newText.length - change.length;
-        result = head + change.newText + tail;
-
-        mapGenerator.addMapping({
-            generated: getLineAndColumn(result, start),
-            original: getLineAndColumn(text, change.start),
-            source: fileName
-        });
-
-        change = edits[++i];
-    }
-
-    return {
-        text: result,
-        map: JSON.parse(mapGenerator.toString())
-    };
-}
-
-/**
- * Merges the source maps provided by each of the two steps.
- */
-function mergeSourceMaps(mahaloMap: sourceMap.RawSourceMap, typescriptMap: sourceMap.RawSourceMap) {
-    if (!mahaloMap) {
-        return typescriptMap;
-    }
-    
-    let mahaloMapConsumer = new SourceMapConsumer(mahaloMap);
-    let typescriptMapConsumer = new SourceMapConsumer(typescriptMap);
-    let mergedMapGenerator = new SourceMapGenerator();
-
-    typescriptMapConsumer.eachMapping(function (mapping) {
-        let originalPosition = mahaloMapConsumer.originalPositionFor({
-            line: mapping.originalLine,
-            column: mapping.originalColumn
-        });
-
-        if (!originalPosition.source) {
-            return;
-        }
-
-        mergedMapGenerator.addMapping({
-            original: {
-                line: originalPosition.line,
-                column: originalPosition.column
-            },
-            generated: {
-                line: mapping.generatedLine,
-                column: mapping.generatedColumn
-            },
-            source: mapping.source,
-            name: mapping.name
-        });
-    });
-
-    let mergedMap = JSON.parse(mergedMapGenerator.toString());
-
-    mergedMap.sources = mahaloMap.sources;
-    
-    return mergedMap;
-}
-
-function getLineAndColumn(text, i) {
-    var line = 1,
-        column = 0;
-    
-    while (i--) {
-        text[i] === '\n' && line++;
-        line === 1 && column++;
-    }
-
-    return {line: line, column: column};
-}
-
-const resolutionHost = {
-    fileExists: ts.sys.fileExists,
-    readFile: ts.sys.readFile
-};
-
 function createCompilerHost(): ts.CompilerHost {
     let host = ts.createCompilerHost(compilerOptions);
     
@@ -534,3 +509,7 @@ function createCompilerHost(): ts.CompilerHost {
         );
     }
 }
+
+type EditKind = ts.BinaryExpression|ts.PrefixUnaryExpression|ts.PostfixUnaryExpression|ts.DeleteExpression|ts.ClassDeclaration|ts.StringLiteral;
+
+type MemberKind = ts.PropertyAccessExpression|ts.ElementAccessExpression;
