@@ -336,7 +336,7 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
             '() => new Promise(' +
                 'resolve => require.ensure(' +
                     view + ', ' +
-                    'require => resolve(require(' + view + '))' +
+                    'require => resolve(require(' + view + ').default)' +
                 ')' +
             ')'
         );
