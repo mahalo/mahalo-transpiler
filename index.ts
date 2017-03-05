@@ -37,6 +37,7 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
     let sourceMap;
 
     let identifiers = [];
+    
     let assignIdentifier = 'assign';
     let shouldImportAssign = false;
 
@@ -327,10 +328,10 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
     }
 
     function createView(node: ts.StringLiteral, sourceNode: SourceNode) {
-        let view = JSON.stringify(node.getText());
+        let view = node.getText();
         
         sourceNode.children.length = 0;
-
+        
         sourceNode.add(
             '() => new Promise(' +
                 'resolve => require.ensure(' +
