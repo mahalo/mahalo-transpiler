@@ -4,8 +4,6 @@ import {existsSync, readFileSync} from 'fs';
 import {SourceMapConsumer, SourceMapGenerator, SourceNode} from 'source-map';
 import * as mergeSourceMaps from 'merge-source-map';
 
-const programs: ts.Program[] = [];
-
 const matchAttributeAccessor = /:\s*\/\*\s*(get|eval|watch|bind)(\s*[a-z][a-z0-9-]*)?\s*\*\//;
 const matchInject = /\/\*\s*inject\s*\*\//;
 
@@ -453,23 +451,29 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
     }
 }
 
-export function clearPrograms() {
-    programs.length = 0;
+export function clearCachedPrograms() {
+    cachedPrograms.length = 0;
 }
 
+let cachedPrograms: ts.Program[] = [];
+
 export function getProgram(fileName) {
+    fileName = fileName.replace(/\\/g, '/');
+
     let program: ts.Program;
 
-    programs.forEach(cachedProgram => {
-        cachedProgram.getSourceFiles().forEach(sourceFile => {
+    cachedPrograms.forEach(cachedProgram => {
+        cachedProgram && cachedProgram.getSourceFiles().forEach(sourceFile => {
             if (sourceFile.fileName === fileName) {
                 program = cachedProgram;
             }
         });
-    });
+    })
 
     if (!program) {
-        programs.push(
+        cachedPrograms.length > 4 && cachedPrograms.shift();
+        
+        cachedPrograms.push(
             program = ts.createProgram([fileName], compilerOptions, createCompilerHost())
         );
     }
