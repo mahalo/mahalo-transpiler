@@ -238,7 +238,7 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
         if (node.operatorToken.kind !== ts.SyntaxKind.FirstAssignment) {
             sourceNode.add([
                 left.getText(),
-                node.operatorToken.getText()
+                node.operatorToken.getText()[0]
             ]);
         }
 
