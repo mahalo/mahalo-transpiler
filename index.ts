@@ -153,7 +153,7 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
                 }
 
                 if (extendsClass(node, 'default', 'core/component')) {
-
+                    // @todo: Collect locals as well
                     createAttributes(node, sourceNode);
                 }
 
