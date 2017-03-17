@@ -16,6 +16,7 @@ const attributeAccessors = {
 
 const compilerOptions: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES5,
+    lib: ['dom', 'es2015', 'dom.iterable', 'scripthost'],
     module: ts.ModuleKind.CommonJS,
     allowJs: true,
     sourceMap: true
