@@ -4,8 +4,9 @@ import {existsSync, readFileSync} from 'fs';
 import {SourceMapConsumer, SourceMapGenerator, SourceNode} from 'source-map';
 import * as mergeSourceMaps from 'merge-source-map';
 
-const matchAttributeAccessor = /:\s*\/\*\s*(get|eval|watch|bind)(\s*[a-z][a-z0-9-]*)?\s*\*\//;
 const matchInject = /\/\*\s*inject\s*\*\//;
+const matchAttributeAccessor = /:\s*\/\*\s*(get|eval|watch|bind)(\s*[a-z][a-z0-9-]*)?\s*\*\//;
+const matchLocal = /\/\*\s*local\s*\*\//;
 
 const attributeAccessors = {
     get: '',
@@ -18,6 +19,8 @@ const compilerOptions: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES5,
     lib: ['dom', 'es2015', 'dom.iterable', 'scripthost'],
     module: ts.ModuleKind.CommonJS,
+    noUnusedLocals: true,
+    noUnusedParameters: true,
     allowJs: true,
     sourceMap: true
 };
@@ -345,13 +348,9 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
 
     function createInject(node: ts.ClassDeclaration, sourceNode: SourceNode) {
         let inject: [string, string][] = [];
-        let start: number;
 
         ts.forEachChild(node, node => {
-            if (node.kind === ts.SyntaxKind.PropertyDeclaration) {
-                start || (start = node.getFullStart());
-                storeInjection(<ts.PropertyDeclaration>node, inject);
-            }
+            node.kind === ts.SyntaxKind.PropertyDeclaration && storeInjection(<ts.PropertyDeclaration>node, inject);
         });
 
         if (!inject.length) {
@@ -367,13 +366,9 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
 
     function createAttributes(node: ts.ClassDeclaration, sourceNode: SourceNode) {
         let attributes: [string, string][] = [];
-        let start: number;
 
         ts.forEachChild(node, node => {
-            if (node.kind === ts.SyntaxKind.PropertyDeclaration) {
-                start || (start = node.getFullStart());
-                storeAttribute(<ts.PropertyDeclaration>node, attributes);
-            }
+            node.kind === ts.SyntaxKind.PropertyDeclaration && storeAttribute(<ts.PropertyDeclaration>node, attributes);
         });
 
         if (!attributes.length) {
@@ -383,6 +378,24 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
         appendProperty(
             node.name.getText() + '.attributes',
             '{' + attributes.map( attribute => attribute.join(':') ).join(',') + '}',
+            sourceNode
+        );
+    }
+
+    function createLocals(node: ts.ClassDeclaration, sourceNode: SourceNode) {
+        let locals: string[] = [];
+
+        ts.forEachChild(node, node => {
+            node.kind === ts.SyntaxKind.PropertyDeclaration && storeLocal(<ts.PropertyDeclaration>node, locals);
+        });
+
+        if (!locals.length) {
+            return;
+        }
+
+        appendProperty(
+            node.name.getText() + '.locals',
+            '[' + locals.join(',') + ']',
             sourceNode
         );
     }
@@ -421,6 +434,12 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
             JSON.stringify(key),
             JSON.stringify(value)
         ]);
+    }
+
+    function storeLocal(node: ts.PropertyDeclaration, locals: string[]) {
+        matchLocal.test(node.getText()) && locals.push(
+            JSON.stringify(node.name.getText())
+        );
     }
 
     function extendsClass(node: ts.ClassDeclaration, name: string, from: string) {
