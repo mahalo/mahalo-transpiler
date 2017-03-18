@@ -152,7 +152,7 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
                 }
 
                 if (extendsClass(node, 'default', 'core/component')) {
-                    // @todo: Collect locals as well
+                    createLocals(node, sourceNode);
                     createAttributes(node, sourceNode);
                 }
 
@@ -163,7 +163,7 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
                 let initializer = property.initializer;
                 let name = property.name;
                 let parent = <ts.ClassDeclaration>property.parent;
-
+                
                 if (
                     initializer === node &&
                     name.getText() === 'view' &&
@@ -516,14 +516,10 @@ function resolveModuleName(moduleName: string) {
     return resolve(file.resolvedModule.resolvedFileName).replace(/\\/g, '/');
 }
 
-const resolutionHost = {
-    fileExists: ts.sys.fileExists,
-    readFile: ts.sys.readFile
-};
-
 function createCompilerHost(): ts.CompilerHost {
     let host = ts.createCompilerHost(compilerOptions);
     
+    host.realpath = path => /node_modules\/mahalo\//.test(path) ? path : ts.sys.realpath(path);
     host.getDefaultLibFileName = compilerOptions => join(dirname(ts.getDefaultLibFilePath(compilerOptions)), 'lib.es6.d.ts');
 
     return host;
