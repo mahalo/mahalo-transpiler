@@ -1,5 +1,5 @@
 import * as ts from 'typescript';
-import {resolve, basename} from 'path';
+import {resolve, basename, dirname, join} from 'path';
 import {existsSync, readFileSync} from 'fs';
 import {SourceMapConsumer, SourceMapGenerator, SourceNode} from 'source-map';
 import * as mergeSourceMaps from 'merge-source-map';
@@ -17,17 +17,12 @@ const attributeAccessors = {
 
 const compilerOptions: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES5,
-    lib: ['dom', 'es2015', 'dom.iterable', 'scripthost'],
     module: ts.ModuleKind.CommonJS,
+    allowJs: true,
     noUnusedLocals: true,
     noUnusedParameters: true,
-    allowJs: true,
+    noEmit: true,
     sourceMap: true
-};
-
-const resolutionHost = {
-    fileExists: ts.sys.fileExists,
-    readFile: ts.sys.readFile
 };
 
 export default function mahaloTranspiler(moduleName: string, shouldDiagnose = false) {
@@ -48,7 +43,7 @@ export default function mahaloTranspiler(moduleName: string, shouldDiagnose = fa
     shouldDiagnose && ts.getPreEmitDiagnostics(program, sourceFile).forEach(
         diagnostic => {
             if (diagnostic.category === ts.DiagnosticCategory.Error) {
-                throw Error(diagnostic.messageText.toString());
+                throw Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
             }
         }
     );
@@ -513,7 +508,7 @@ function resolveModuleName(moduleName: string) {
         compilerOptions,
         createCompilerHost()
     );
-    
+
     if (!file) {
         throw Error('Cannot find module ' + moduleName);
     }
@@ -521,18 +516,17 @@ function resolveModuleName(moduleName: string) {
     return resolve(file.resolvedModule.resolvedFileName).replace(/\\/g, '/');
 }
 
+const resolutionHost = {
+    fileExists: ts.sys.fileExists,
+    readFile: ts.sys.readFile
+};
+
 function createCompilerHost(): ts.CompilerHost {
     let host = ts.createCompilerHost(compilerOptions);
     
-    host.resolveModuleNames = resolveModuleNames;
+    host.getDefaultLibFileName = compilerOptions => join(dirname(ts.getDefaultLibFilePath(compilerOptions)), 'lib.es6.d.ts');
 
     return host;
-
-    function resolveModuleNames(moduleNames: string[], containingFile: string): ts.ResolvedModule[] {
-        return moduleNames.map(
-            moduleName => ts.resolveModuleName(moduleName, containingFile, compilerOptions, resolutionHost).resolvedModule
-        );
-    }
 }
 
 type EditKind = ts.BinaryExpression|ts.PrefixUnaryExpression|ts.PostfixUnaryExpression|ts.DeleteExpression|ts.ClassDeclaration|ts.StringLiteral;

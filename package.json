@@ -14,14 +14,14 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "merge-source-map": "^1.0.3",
     "source-map": "^0.5.6",
-    "merge-source-map": "^1.0.3"
+    "typescript": "^2.2.1"
   },
   "devDependencies": {
     "@types/node": "^7.0.8",
     "@types/source-map": "^0.5.0",
-    "grunt": "^1.0.1",
-    "typescript": "^2.2.1"
+    "grunt": "^1.0.1"
   },
   "scripts": {
     "version": "grunt",
